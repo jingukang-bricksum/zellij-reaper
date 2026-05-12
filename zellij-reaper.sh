@@ -197,15 +197,6 @@ suggested_name() {
   sanitize_name "$(basename "$cwd")"
 }
 
-# True iff a session name is eligible for auto-rename: either still the zellij
-# default <adjective>-<noun>, or already in our own <base>_MMDD-HHMM format
-# (so the timestamp suffix can be refreshed on every pass).
-is_renameable_name() {
-  [[ "$1" =~ ^[a-z]+-[a-z]+$ ]] && return 0
-  [[ "$1" =~ _[0-9]{4}-[0-9]{4}$ ]] && return 0
-  return 1
-}
-
 # Format the session's last-activity time as "_MMDD-HHMM" for use as a suffix.
 # Falls back to "now" if the activity time is unreadable.
 activity_suffix() {
@@ -225,7 +216,9 @@ maybe_rename() {
   local name=$1 info_dir=$2
 
   [ "$AUTO_RENAME" = 1 ] || return 0
-  is_renameable_name "$name" || return 0
+  # No name-pattern gate: every surviving session that isn't attached or
+  # otherwise filtered by the caller is eligible. Use PROTECT_REGEX to keep
+  # specific names untouched.
 
   local base desired final
   base=$(suggested_name "$info_dir")
