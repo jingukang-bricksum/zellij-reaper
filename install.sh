@@ -171,6 +171,13 @@ else
   note "attach detection will use zellij's session-metadata.kdl only (still safe)"
 fi
 
+if command -v perl >/dev/null; then
+  ok "perl ($(perl -e 'printf "v%vd", $^V'))"
+else
+  warn "perl not found"
+  note "auto-rename will fall back to ASCII-only (Korean titles get stripped)"
+fi
+
 for src in "$REPO_DIR/zellij-reaper.sh" \
            "$REPO_DIR/reap.sh" \
            "$REPO_DIR/systemd/zellij-reaper.service" \

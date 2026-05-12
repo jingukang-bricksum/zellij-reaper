@@ -167,20 +167,38 @@ session_launch_cwd() {
   awk '/^    cwd "/ { sub(/.*cwd "/,""); sub(/"$/,""); print; exit }' "$f"
 }
 
-# Sanitize a free-form string into a zellij-friendly session name. Drops
-# everything that isn't ASCII alnum / dash / underscore (Korean is stripped:
-# zellij accepts it but our default-pattern detection assumes ASCII, so this
-# keeps the round-trip stable). Returns empty for uninformative input.
+# Sanitize a free-form pane title into a zellij-friendly session name.
+# Strips Braille spinners and dingbats (claude/zellij decoration), then
+# replaces everything that isn't a Unicode letter/number/underscore/dash with
+# a single dash. Korean (and any non-ASCII letter) is preserved so distinct
+# Korean-titled sessions get distinct names instead of all collapsing to the
+# launch cwd. Falls back to an ASCII-only sed pass if perl is not installed.
+# Returns empty string for uninformative input.
 sanitize_name() {
   local raw=$1 out
-  # shellcheck disable=SC2018,SC2019  # ASCII-only by design here
-  out=$(printf '%s' "$raw" \
-    | sed -E 's|[^a-zA-Z0-9_-]+|-|g; s|-+|-|g; s|^-||; s|-$||' \
-    | tr 'A-Z' 'a-z')
+  if command -v perl >/dev/null 2>&1; then
+    out=$(printf '%s' "$raw" | perl -CSDA -e '
+      my $s = do { local $/; <STDIN> };
+      $s =~ s/^\s+//;
+      $s =~ s/[\x{2600}-\x{27BF}\x{2800}-\x{28FF}]+//g;  # symbols, dingbats, braille
+      $s =~ s/^[^\p{L}\p{N}]+//;
+      $s =~ s/[^\p{L}\p{N}_-]+/-/g;
+      $s =~ s/-+/-/g;
+      $s =~ s/^-+|-+$//g;
+      $s = lc $s;
+      print substr($s, 0, 50);  # char-based truncation, UTF-8 safe
+    ' 2>/dev/null)
+  else
+    # shellcheck disable=SC2018,SC2019  # ASCII-only fallback
+    out=$(printf '%s' "$raw" \
+      | sed -E 's|[^a-zA-Z0-9_-]+|-|g; s|-+|-|g; s|^-||; s|-$||' \
+      | tr 'A-Z' 'a-z')
+    out=${out:0:50}
+  fi
   case "$out" in
     "" | pane-* | tab-* | bash | zsh | sh | fish | dash) echo ""; return ;;
   esac
-  printf '%s' "${out:0:50}"
+  printf '%s' "$out"
 }
 
 # Decide a "good" new name: pane title first, fallback to cwd basename.
