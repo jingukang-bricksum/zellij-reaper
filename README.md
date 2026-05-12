@@ -84,10 +84,30 @@ The timer fires on a 1-hour interval (`OnUnitActiveSec=1h`, `AccuracySec=5min`,
 `~/.config/systemd/user/zellij-reaper.timer` if needed.
 
 
+## Run on demand
+
+```sh
+zellij-reap run         # one normal pass (uses the timer's threshold)
+zellij-reap force-run   # bypass the age check; reap any idle/exited session
+                        # that passes every other safety guard
+zellij-reap --help
+```
+
+`force-run` is the "I know what I'm doing, drop everything that isn't actively
+in use" button. It still refuses to touch:
+
+- sessions with a connected client,
+- sessions with any foreground command running in any pane,
+- sessions whose layout was created with `command="claude"`,
+- sessions whose name matches `PROTECT_REGEX`.
+
+If `~/.local/bin` is not on your `PATH`, run `./reap.sh run` from the repo
+directory instead.
+
+
 ## Inspect
 
 ```sh
-./install.sh --run                                  # run one pass now and tail this run's log
 systemctl --user list-timers zellij-reaper.timer    # next scheduled fire
 tail -f ~/.cache/zellij-reaper.log                  # decisions, with pane titles
 ```
