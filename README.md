@@ -47,6 +47,26 @@ The installer:
 Re-run any time to upgrade; the install is idempotent.
 
 
+## Update
+
+```sh
+cd zellij-reaper
+git pull
+./install.sh
+```
+
+The installer **overwrites** `~/.local/bin/zellij-reaper.sh` and the two
+systemd unit files unconditionally. If you have hand-edited the service file
+to change `MAX_AGE_HOURS` or `DRY_RUN`, back it up first or note your values:
+
+```sh
+cp ~/.config/systemd/user/zellij-reaper.service{,.bak}
+git pull && ./install.sh
+# then re-apply your env values to the new service file and:
+systemctl --user daemon-reload
+```
+
+
 ## Configure
 
 Edit `~/.config/systemd/user/zellij-reaper.service`:
