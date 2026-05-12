@@ -11,10 +11,14 @@ Targets two kinds of session you usually want gone:
   at a bare shell prompt with no foreground command running.
 
 Surviving sessions are also given more meaningful names: if the current name
-is still the zellij default (e.g. `marvellous-ocelot`), the reaper renames it
-based on the first pane's title (or, failing that, the launch directory). For
-a session whose pane title is `vim foo.txt`, the rename target is `vim-foo-txt`;
-collisions get a `-2`, `-3`, ... suffix. Disable with `AUTO_RENAME=0`.
+is still the zellij default (e.g. `marvellous-ocelot`) or already in our own
+`<base>_MMDD-HHMM` format, the reaper renames it based on the first pane's
+title (or, failing that, the launch directory) and appends the session's
+last-activity timestamp as a `_MMDD-HHMM` suffix. For a session whose pane
+title is `vim foo.txt` and was last touched at 14:31 on May 12, the rename
+target is `vim-foo-txt_0512-1431`; the suffix refreshes on every pass so the
+name reflects when you were last in there. Collisions get a `-2`, `-3`, ...
+tail. Disable with `AUTO_RENAME=0`.
 
 Sessions that meet **any** of the following are never touched:
 
