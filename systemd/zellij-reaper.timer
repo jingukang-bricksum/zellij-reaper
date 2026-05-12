@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly trigger for zellij-reaper
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=5min
+Persistent=true
+Unit=zellij-reaper.service
+
+[Install]
+WantedBy=timers.target

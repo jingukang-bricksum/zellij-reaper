@@ -1,0 +1,12 @@
+[Unit]
+Description=Reap stale (EXITED/IDLE) zellij sessions, never touching attached or claude sessions
+Documentation=file:%h/.local/bin/zellij-reaper.sh
+
+[Service]
+Type=oneshot
+# Defaults: 1h threshold, live mode. Set DRY_RUN=1 here to test without deleting.
+Environment=DRY_RUN=0
+Environment=MAX_AGE_HOURS=1
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/.local/bin/zellij-reaper.sh
+Nice=10
