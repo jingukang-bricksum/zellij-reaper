@@ -273,13 +273,18 @@ decide() {
     return
   fi
 
-  local srv_for_claude=""
-  if [ -S "$RUNTIME_DIR/$name" ]; then
-    srv_for_claude=$(server_pid_for "$RUNTIME_DIR/$name")
-  fi
-  if is_claude_session "$info_dir" "$srv_for_claude"; then
-    echo "SKIP claude session (protected)"
-    return
+  # Claude-session guard only protects RUNNING sessions. An EXITED claude
+  # session is no longer doing any work, so let the normal age threshold
+  # decide whether it stays around (so resurrect-able) or gets reaped.
+  if [ "$status" != "EXITED" ]; then
+    local srv_for_claude=""
+    if [ -S "$RUNTIME_DIR/$name" ]; then
+      srv_for_claude=$(server_pid_for "$RUNTIME_DIR/$name")
+    fi
+    if is_claude_session "$info_dir" "$srv_for_claude"; then
+      echo "SKIP claude session (protected)"
+      return
+    fi
   fi
 
   local last_active

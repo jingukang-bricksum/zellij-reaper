@@ -24,7 +24,8 @@ Sessions that meet **any** of the following are never touched:
   child processes);
 - the session layout was built with a `claude` command (or a `claude` process
   is currently running under it) — Claude Code sessions are protected as a
-  special case;
+  special case **while RUNNING**; once they go EXITED ("attach to resurrect")
+  the protection lifts and the normal age threshold decides;
 - the session's last-activity mtime is younger than the configured threshold
   (`MAX_AGE_HOURS`, default `1h`);
 - a user-supplied `PROTECT_REGEX` matches the session name.
