@@ -10,6 +10,12 @@ Targets two kinds of session you usually want gone:
 - **IDLE** — the server is alive, nobody is attached, and every pane is sitting
   at a bare shell prompt with no foreground command running.
 
+Surviving sessions are also given more meaningful names: if the current name
+is still the zellij default (e.g. `marvellous-ocelot`), the reaper renames it
+based on the first pane's title (or, failing that, the launch directory). For
+a session whose pane title is `vim foo.txt`, the rename target is `vim-foo-txt`;
+collisions get a `-2`, `-3`, ... suffix. Disable with `AUTO_RENAME=0`.
+
 Sessions that meet **any** of the following are never touched:
 
 - a client is currently attached (`session-metadata.kdl::connected_clients > 0`,
@@ -74,6 +80,7 @@ Edit `~/.config/systemd/user/zellij-reaper.service`:
 ```ini
 Environment=DRY_RUN=0          # set to 1 to log decisions without deleting
 Environment=MAX_AGE_HOURS=1    # threshold; or use MAX_AGE_DAYS instead
+# Environment=AUTO_RENAME=0            # optional, disable auto-renaming
 # Environment=PROTECT_REGEX=^keep-     # optional, names matching are skipped
 ```
 

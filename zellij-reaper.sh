@@ -14,6 +14,10 @@
 #   LOG            default ~/.cache/zellij-reaper.log
 #   LOCK           default ~/.cache/zellij-reaper.lock
 #   PROTECT_REGEX  default empty; sessions whose name matches will never be reaped
+#   AUTO_RENAME    default 1; rename surviving sessions whose name is still the
+#                  zellij default (e.g. "marvellous-ocelot") to something derived
+#                  from the first pane title or, failing that, the launch cwd.
+#                  Set to 0 to disable.
 
 set -euo pipefail
 
@@ -21,6 +25,7 @@ DRY_RUN="${DRY_RUN:-1}"
 LOG="${LOG:-$HOME/.cache/zellij-reaper.log}"
 LOCK="${LOCK:-$HOME/.cache/zellij-reaper.lock}"
 PROTECT_REGEX="${PROTECT_REGEX:-}"
+AUTO_RENAME="${AUTO_RENAME:-1}"
 
 # Serialize concurrent runs: a timer-fired pass and a manual run must not both
 # enumerate and delete sessions at once. Wait up to 5s for the lock; if another
@@ -138,6 +143,122 @@ pane_titles_summary() {
   ' "$f"
 }
 
+# Echo the title of the first non-plugin pane (or empty).
+first_pane_title() {
+  local info=$1
+  local f="$info/session-metadata.kdl"
+  [ -f "$f" ] || { echo ""; return; }
+  awk '
+    /^    pane / { in_pane=1; is_plugin=0; title=""; next }
+    in_pane && /^    \}/ {
+      if (is_plugin==0 && title!="") { print title; exit }
+      in_pane=0; next
+    }
+    in_pane && /is_plugin true/ { is_plugin=1 }
+    in_pane && /title "/ { sub(/.*title "/,""); sub(/"$/,""); title=$0 }
+  ' "$f"
+}
+
+# Echo the launch cwd recorded in session-layout.kdl (or empty).
+session_launch_cwd() {
+  local info=$1
+  local f="$info/session-layout.kdl"
+  [ -f "$f" ] || { echo ""; return; }
+  awk '/^    cwd "/ { sub(/.*cwd "/,""); sub(/"$/,""); print; exit }' "$f"
+}
+
+# Sanitize a free-form string into a zellij-friendly session name. Drops
+# everything that isn't ASCII alnum / dash / underscore (Korean is stripped:
+# zellij accepts it but our default-pattern detection assumes ASCII, so this
+# keeps the round-trip stable). Returns empty for uninformative input.
+sanitize_name() {
+  local raw=$1 out
+  # shellcheck disable=SC2018,SC2019  # ASCII-only by design here
+  out=$(printf '%s' "$raw" \
+    | sed -E 's|[^a-zA-Z0-9_-]+|-|g; s|-+|-|g; s|^-||; s|-$||' \
+    | tr 'A-Z' 'a-z')
+  case "$out" in
+    "" | pane-* | tab-* | bash | zsh | sh | fish | dash) echo ""; return ;;
+  esac
+  printf '%s' "${out:0:50}"
+}
+
+# Decide a "good" new name: pane title first, fallback to cwd basename.
+suggested_name() {
+  local info=$1 candidate
+  candidate=$(sanitize_name "$(first_pane_title "$info")")
+  if [ -n "$candidate" ]; then
+    printf '%s' "$candidate"
+    return
+  fi
+  local cwd
+  cwd=$(session_launch_cwd "$info")
+  [ -z "$cwd" ] && return
+  sanitize_name "$(basename "$cwd")"
+}
+
+# True iff `name` matches the zellij default <adjective>-<noun> pattern.
+is_default_name() {
+  [[ "$1" =~ ^[a-z]+-[a-z]+$ ]]
+}
+
+# Try to rename a surviving session to something derived from its content.
+# Echoes a status line (caller logs it). No-op when AUTO_RENAME=0, when the
+# current name is not the zellij default pattern, or when no better name can
+# be derived.
+maybe_rename() {
+  # Always return 0 so the caller's `var=$(maybe_rename ...)` does not trip
+  # `set -e` when we decide there is nothing to rename.
+  local name=$1 info_dir=$2
+
+  [ "$AUTO_RENAME" = 1 ] || return 0
+  is_default_name "$name" || return 0
+
+  local desired final
+  desired=$(suggested_name "$info_dir")
+  [ -z "$desired" ] && return 0
+  [ "$desired" = "$name" ] && return 0
+
+  # Collision avoidance against the *visible* session list. zellij also keeps
+  # an internal cache of recently-used names that aren't on disk anymore and
+  # will reject a rename to those with "A session by this name already exists";
+  # we handle that by retrying with -2, -3, ... below.
+  local existing n=2
+  existing=$(zellij list-sessions -n -s 2>/dev/null || true)
+  final=$desired
+  while printf '%s\n' "$existing" | grep -qFx "$final"; do
+    final="${desired}-${n}"
+    n=$((n+1))
+    [ "$n" -gt 99 ] && return 0
+  done
+
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "  -> DRY_RUN: would rename '$name' → '$final'"
+    return 0
+  fi
+
+  local err
+  while [ "$n" -le 99 ]; do
+    if err=$(zellij --session "$name" action rename-session "$final" 2>&1); then
+      echo "  -> renamed: $name → $final"
+      return 0
+    fi
+    # Only retry on the specific "already exists" case; bail on anything else.
+    case "$err" in
+      *"already exists"*)
+        final="${desired}-${n}"
+        n=$((n+1))
+        ;;
+      *)
+        echo "  -> rename FAILED: $name → $final :: $err"
+        return 0
+        ;;
+    esac
+  done
+  echo "  -> rename gave up: $name → $desired (too many collisions)"
+  return 0
+}
+
 decide() {
   local name=$1 status=$2
 
@@ -249,7 +370,7 @@ main() {
     return 0
   fi
 
-  local line name status decision out titles
+  local line name status decision out titles rename_msg
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     name=$(awk '{print $1}' <<<"$line")
@@ -269,6 +390,17 @@ main() {
           log "  -> FAILED: $name :: $out"
         fi
       fi
+    elif [ "$status" = "RUNNING" ]; then
+      # Survived this pass — try to give it a more meaningful name.
+      # Don't disturb sessions with attached clients or any uncertainty.
+      case "$decision" in
+        "SKIP client attached"*|"SKIP attach-check uncertain"*|"SKIP protected by PROTECT_REGEX")
+          : ;;
+        *)
+          rename_msg=$(maybe_rename "$name" "$SESSION_INFO_DIR/$name")
+          [ -n "$rename_msg" ] && log "$rename_msg"
+          ;;
+      esac
     fi
   done <<<"$sessions_raw"
 
