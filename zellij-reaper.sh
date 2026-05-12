@@ -7,7 +7,8 @@
 # Fail-closed: any uncertainty -> SKIP.
 #
 # Env overrides:
-#   MAX_AGE_HOURS  if set, threshold in hours (takes precedence)
+#   MAX_AGE_HOURS  if set, threshold in hours (takes precedence). Set to 0 to
+#                  disable the age check entirely (used by `zellij-reap force-run`).
 #   MAX_AGE_DAYS   threshold in days (default 3, used if MAX_AGE_HOURS unset)
 #   DRY_RUN        default 1 (set to 0 to actually delete)
 #   LOG            default ~/.cache/zellij-reaper.log
@@ -171,7 +172,9 @@ decide() {
   local age_d=$((age / 86400))
 
   if [ "$status" = "EXITED" ]; then
-    if [ "$age" -lt "$threshold_secs" ]; then
+    # threshold_secs == 0 means "age check disabled" (force mode); never SKIP
+    # on age in that case, even if mtime is in the future due to live updates.
+    if [ "$threshold_secs" -gt 0 ] && [ "$age" -lt "$threshold_secs" ]; then
       echo "SKIP EXITED but only ${age_h}h old"
       return
     fi
@@ -216,7 +219,7 @@ decide() {
     return
   fi
 
-  if [ "$age" -lt "$threshold_secs" ]; then
+  if [ "$threshold_secs" -gt 0 ] && [ "$age" -lt "$threshold_secs" ]; then
     echo "SKIP IDLE but only ${age_h}h since last activity"
     return
   fi
