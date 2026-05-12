@@ -87,8 +87,8 @@ The timer fires on a 1-hour interval (`OnUnitActiveSec=1h`, `AccuracySec=5min`,
 ## Inspect
 
 ```sh
-systemctl --user list-timers zellij-reaper.timer    # next fire time
-systemctl --user start zellij-reaper.service        # run once, now
+./install.sh --run                                  # run one pass now and tail this run's log
+systemctl --user list-timers zellij-reaper.timer    # next scheduled fire
 tail -f ~/.cache/zellij-reaper.log                  # decisions, with pane titles
 ```
 

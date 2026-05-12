@@ -11,6 +11,7 @@
 #
 # Usage:
 #   ./install.sh                # install / upgrade
+#   ./install.sh --run          # trigger one reaper pass now and tail the log
 #   ./install.sh --uninstall    # remove everything
 #   ./install.sh --help         # show this message
 
@@ -22,6 +23,7 @@ zellij-reaper installer
 
 Usage:
   ./install.sh               install or upgrade (idempotent)
+  ./install.sh --run         trigger one reaper pass now and show its log entries
   ./install.sh --uninstall   remove binary, systemd units, disable timer
   ./install.sh --help        show this message
 
@@ -32,7 +34,7 @@ EOF
 
 case "${1:-}" in
   -h|--help) print_help; exit 0 ;;
-  --uninstall) ;;  # handled later
+  --uninstall|--run) ;;  # handled later
   "") ;;
   *) printf 'unknown argument: %s\n\n' "$1" >&2; print_help >&2; exit 2 ;;
 esac
@@ -120,7 +122,38 @@ next_fire_time() {
   fi
 }
 
+run_now() {
+  banner
+  section "Running reaper now"
+  if ! systemctl --user list-unit-files zellij-reaper.service >/dev/null 2>&1; then
+    err "zellij-reaper.service is not installed; run: ./install.sh"
+    exit 1
+  fi
+  local log="$HOME/.cache/zellij-reaper.log"
+  local mark_before=0
+  [ -f "$log" ] && mark_before=$(wc -c <"$log")
+
+  if systemctl --user start zellij-reaper.service; then
+    ok "reaper pass complete"
+  else
+    err "reaper pass failed (check: systemctl --user status zellij-reaper.service)"
+    exit 1
+  fi
+
+  echo
+  section "New log entries"
+  if [ -f "$log" ]; then
+    # Print only what was appended during this run.
+    tail -c "+$((mark_before + 1))" "$log" | sed "s/^/  ${C_DIM}|${C_RESET} /"
+  else
+    note "no log file yet (zellij not installed?)"
+  fi
+  echo
+  exit 0
+}
+
 [ "${1:-}" = "--uninstall" ] && uninstall
+[ "${1:-}" = "--run" ]       && run_now
 
 banner
 
@@ -210,7 +243,7 @@ printf '  %s%-12s%s%s\n' "$C_CYAN" "schedule:"  "$C_RESET" "  $(next_fire_time)"
 printf '  %s%-12s%s%s\n' "$C_CYAN" "log:"       "$C_RESET" "  $(dim_path "$HOME/.cache/zellij-reaper.log")"
 printf '  %s%-12s%s%s\n' "$C_CYAN" "configure:" "$C_RESET" "  $(dim_path "$SERVICE_PATH")"
 printf '                %s(edit MAX_AGE_HOURS or DRY_RUN, then daemon-reload)%s\n' "$C_DIM" "$C_RESET"
-printf '  %s%-12s%s%s\n' "$C_CYAN" "run now:"   "$C_RESET" "  systemctl --user start zellij-reaper.service"
+printf '  %s%-12s%s%s\n' "$C_CYAN" "run now:"   "$C_RESET" "  ./install.sh --run"
 printf '  %s%-12s%s%s\n' "$C_CYAN" "uninstall:" "$C_RESET" "  ./install.sh --uninstall"
 hr
 echo
