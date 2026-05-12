@@ -12,8 +12,30 @@
 # Usage:
 #   ./install.sh                # install / upgrade
 #   ./install.sh --uninstall    # remove everything
+#   ./install.sh --help         # show this message
 
 set -euo pipefail
+
+print_help() {
+  cat <<'EOF'
+zellij-reaper installer
+
+Usage:
+  ./install.sh               install or upgrade (idempotent)
+  ./install.sh --uninstall   remove binary, systemd units, disable timer
+  ./install.sh --help        show this message
+
+Environment:
+  NO_COLOR=1                 disable colored output
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) print_help; exit 0 ;;
+  --uninstall) ;;  # handled later
+  "") ;;
+  *) printf 'unknown argument: %s\n\n' "$1" >&2; print_help >&2; exit 2 ;;
+esac
 
 REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX_BIN="$HOME/.local/bin"
@@ -28,7 +50,8 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'
   C_CYAN=$'\033[36m'
 else
-  C_BOLD= C_DIM= C_RESET= C_GREEN= C_YELLOW= C_RED= C_CYAN=
+  C_BOLD=''; C_DIM=''; C_RESET=''
+  C_GREEN=''; C_YELLOW=''; C_RED=''; C_CYAN=''
 fi
 
 section() { printf '\n%s▸ %s%s\n'  "$C_BOLD"  "$*" "$C_RESET"; }
@@ -72,6 +95,8 @@ dim_path() { printf '%s' "${1/#$HOME/\~}"; }
 # Compute the next-fire time from LastTriggerUSec + 1h (matches OnUnitActiveSec
 # in the timer unit). systemd's NextElapseUSecRealtime is unreliable on some
 # environments (WSL2, oneshot-after-enable), but LastTriggerUSec is stable.
+# Note: the 1h interval is hard-coded to match systemd/zellij-reaper.timer's
+# OnUnitActiveSec=1h. If you change that file you should also change this.
 next_fire_time() {
   local last
   last=$(systemctl --user show zellij-reaper.timer --value -p LastTriggerUSec 2>/dev/null || true)

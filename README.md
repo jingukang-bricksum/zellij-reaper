@@ -30,7 +30,7 @@ unreadable) results in a `SKIP`, never a deletion.
 ## Install
 
 ```sh
-git clone https://github.com/<you>/zellij-reaper.git
+git clone https://github.com/jingukang-bricksum/zellij-reaper.git
 cd zellij-reaper
 ./install.sh
 ```

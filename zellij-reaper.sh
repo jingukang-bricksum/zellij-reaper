@@ -11,13 +11,22 @@
 #   MAX_AGE_DAYS   threshold in days (default 3, used if MAX_AGE_HOURS unset)
 #   DRY_RUN        default 1 (set to 0 to actually delete)
 #   LOG            default ~/.cache/zellij-reaper.log
+#   LOCK           default ~/.cache/zellij-reaper.lock
 #   PROTECT_REGEX  default empty; sessions whose name matches will never be reaped
 
 set -euo pipefail
 
 DRY_RUN="${DRY_RUN:-1}"
 LOG="${LOG:-$HOME/.cache/zellij-reaper.log}"
+LOCK="${LOCK:-$HOME/.cache/zellij-reaper.lock}"
 PROTECT_REGEX="${PROTECT_REGEX:-}"
+
+# Serialize concurrent runs: a timer-fired pass and a manual run must not both
+# enumerate and delete sessions at once. Wait up to 5s for the lock; if another
+# instance is still holding it, exit quietly without logging anything.
+mkdir -p "$(dirname "$LOCK")"
+exec 9>"$LOCK"
+flock -w 5 9 || exit 0
 
 RUNTIME_DIR="/run/user/$UID/zellij/contract_version_1"
 SESSION_INFO_DIR="$HOME/.cache/zellij/contract_version_1/session_info"
