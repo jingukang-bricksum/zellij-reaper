@@ -12,11 +12,12 @@
 #                 - never reap a session with a foreground command in a pane
 #                 - never reap a session created with `command="claude"`
 #                 - obey PROTECT_REGEX
-#   resize      send a layout-recalc trigger to every attached session so the
-#               server re-reads each client's terminal size. Effect is the same
-#               as detaching and reattaching, but no client is ever disconnected.
-#               Implemented as toggle-fullscreen ×2 against each session, which
-#               causes a brief visible flash but is fully attached the whole time.
+#   resize      send SIGWINCH to every zellij client process so each one
+#               re-reads its PTY size and reports the new geometry to the
+#               server. This is what a real terminal resize triggers under
+#               the hood. No client is disconnected and there is no visible
+#               flash; if a client's PTY size is already correct the signal
+#               is a cheap no-op.
 #
 # When installed via ./install.sh this file is also placed at
 # ~/.local/bin/zellij-reap so you can run `zellij-reap run` from anywhere.
@@ -58,16 +59,15 @@ Usage:
                                  processes that have no matching socket file —
                                  these are usually the source of broken sessions
                                  that reappear right after cleanup.
-  zellij-reap resize [--dry-run] [--all-sessions]
-                                 force a layout-recalc on attached sessions so
-                                 they pick up the current terminal size. Closest
-                                 equivalent to detach→reattach without ever
-                                 disconnecting a client. Uses toggle-fullscreen
-                                 ×2 under the hood — expect a brief flash, no
-                                 disconnect. By default skips sessions with no
-                                 attached client (the action would have nothing
-                                 to resize against); --all-sessions removes that
-                                 filter.
+  zellij-reap resize [--dry-run]
+                                 send SIGWINCH to every zellij client process
+                                 (i.e. `zellij` invocations attached to a
+                                 session, excluding `zellij --server`). Each
+                                 client re-reads its PTY size and reports it to
+                                 the server, which then redraws the layout. No
+                                 disconnect, no visible flash. Detached sessions
+                                 have no client process so they're automatically
+                                 a no-op.
   zellij-reap --help             show this message
 
 Safety guards always honored (run / force-run):
@@ -400,91 +400,64 @@ run_recover() {
 }
 
 run_resize() {
-  local dry=0 include_all=0
+  local dry=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --dry-run)            dry=1 ;;
-      --all|--all-sessions) include_all=1 ;;
+      --dry-run) dry=1 ;;
       *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
     shift
   done
 
-  section "Refreshing session sizes"
-  [ "$dry" = 1 ] && note "DRY RUN — no actions sent"
-  [ "$include_all" = 1 ] && note "--all-sessions: detached servers included"
+  section "Refreshing client sizes via SIGWINCH"
+  [ "$dry" = 1 ] && note "DRY RUN — no signals sent"
 
-  if ! command -v zellij >/dev/null; then
-    err "zellij not installed"
-    exit 1
-  fi
+  # Walk every process owned by this user whose argv0 is `zellij`, and skip
+  # `zellij --server` (those don't own a PTY) plus our own running CLI (whose
+  # cmdline matches "zellij-reap"). Everything else is a client.
+  local pid cmdline self_pid=$$
+  local -a clients=()
+  while IFS= read -r pid; do
+    [ -z "$pid" ] && continue
+    [ "$pid" = "$self_pid" ] && continue
+    cmdline=$(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null) || continue
+    case "$cmdline" in
+      *--server*)   continue ;;
+      *zellij-reap*) continue ;;
+      zellij*)      clients+=("$pid|$cmdline") ;;
+    esac
+  done < <(pgrep -u "$UID" "^zellij" 2>/dev/null || true)
 
-  local sessions_raw
-  if ! sessions_raw=$(zellij list-sessions -n 2>/dev/null); then
-    warn "zellij list-sessions failed (no sessions or zellij broken)"
+  if [ "${#clients[@]}" -eq 0 ]; then
+    warn "no zellij client processes found"
+    note "nothing is attached — there's nothing to resize"
     echo
     return 0
   fi
-  if [ -z "$sessions_raw" ]; then
-    warn "no sessions"
-    echo
-    return 0
-  fi
 
-  local info_root="$HOME/.cache/zellij/contract_version_1/session_info"
-  local line name connected
-  local refreshed=0 skipped=0 failed=0
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    name=$(awk '{print $1}' <<<"$line")
-
-    # EXITED sessions have no server to receive an action.
-    if grep -q EXITED <<<"$line"; then
-      note "skip $name (EXITED)"
-      skipped=$((skipped + 1))
-      continue
-    fi
-
-    # Default: only refresh sessions a client is attached to. A resize trigger
-    # against a detached server has no terminal to match against and is a no-op
-    # for the user's purpose, so we skip it unless --all-sessions was passed.
-    if [ "$include_all" = 0 ]; then
-      connected=$(awk '$1=="connected_clients" && NF>=2 {print $2; exit}' \
-                    "$info_root/$name/session-metadata.kdl" 2>/dev/null)
-      if [ -z "$connected" ] || [ "$connected" = 0 ]; then
-        note "skip $name (no attached client)"
-        skipped=$((skipped + 1))
-        continue
-      fi
-    fi
-
+  local sent=0 failed=0 entry
+  for entry in "${clients[@]}"; do
+    pid="${entry%%|*}"
+    cmdline="${entry#*|}"
     if [ "$dry" = 1 ]; then
-      ok "would refresh: $name"
+      ok "would SIGWINCH pid=$pid  (${cmdline% })"
       continue
     fi
-
-    # Two toggles return the pane to its prior fullscreen state while forcing
-    # zellij to recalculate layout against each attached client's current size.
-    # We don't trust the exit code alone — `zellij action` exits 0 even when the
-    # server rejects the message — but a failure here is best-effort; surfacing
-    # the error is the most we can do without a server-side ack channel.
-    if zellij --session "$name" action toggle-fullscreen >/dev/null 2>&1 \
-       && zellij --session "$name" action toggle-fullscreen >/dev/null 2>&1; then
-      ok "refreshed: $name"
-      refreshed=$((refreshed + 1))
+    if kill -WINCH "$pid" 2>/dev/null; then
+      ok "SIGWINCH → pid=$pid"
+      sent=$((sent + 1))
     else
-      err "failed: $name"
+      err "kill -WINCH failed for pid=$pid (process gone?)"
       failed=$((failed + 1))
     fi
-  done <<<"$sessions_raw"
+  done
 
   echo
   if [ "$dry" = 1 ]; then
-    note "dry run summary: $skipped skipped"
+    note "dry run: ${#clients[@]} client(s) would be signaled"
   else
-    ok "refreshed $refreshed session(s)"
-    [ "$skipped" -gt 0 ] && note "skipped $skipped session(s)"
-    [ "$failed"  -gt 0 ] && warn "failed $failed session(s)"
+    ok "signaled $sent client(s)"
+    [ "$failed" -gt 0 ] && warn "$failed signal(s) failed"
   fi
   echo
 }
