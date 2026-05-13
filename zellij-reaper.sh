@@ -175,9 +175,18 @@ session_launch_cwd() {
 # launch cwd. Falls back to an ASCII-only sed pass if perl is not installed.
 # Returns empty string for uninformative input.
 sanitize_name() {
+  # Truncates to a byte length safe for zellij's Unix-domain socket path.
+  # The runtime path is "/run/user/<uid>/zellij/contract_version_1/<name>",
+  # and Linux caps that path at ~107 bytes. With UID=1000 the fixed prefix
+  # is 41 bytes, leaving 66 for the name. We need room for our own suffixes
+  # (_MMDD-HHMM = 10 bytes, plus an optional -NN collision tail = 3 bytes),
+  # so the base is capped at 50 bytes here. Korean glyphs are 3 bytes each
+  # in UTF-8, so a char-based 50-char limit could blow well past that —
+  # we walk codepoints and stop before the byte budget runs out.
   local raw=$1 out
   if command -v perl >/dev/null 2>&1; then
     out=$(printf '%s' "$raw" | perl -CSDA -e '
+      use Encode qw(encode_utf8);
       my $s = do { local $/; <STDIN> };
       $s =~ s/^\s+//;
       $s =~ s/[\x{2600}-\x{27BF}\x{2800}-\x{28FF}]+//g;  # symbols, dingbats, braille
@@ -186,14 +195,25 @@ sanitize_name() {
       $s =~ s/-+/-/g;
       $s =~ s/^-+|-+$//g;
       $s = lc $s;
-      print substr($s, 0, 50);  # char-based truncation, UTF-8 safe
+      my $max_bytes = 50;
+      my $bytes = 0;
+      my $out = "";
+      for my $c (split //, $s) {
+        my $cb = length(encode_utf8($c));
+        last if $bytes + $cb > $max_bytes;
+        $out .= $c;
+        $bytes += $cb;
+      }
+      $out =~ s/-+$//;  # the truncation may have stranded a trailing dash
+      print $out;
     ' 2>/dev/null)
   else
-    # shellcheck disable=SC2018,SC2019  # ASCII-only fallback
+    # shellcheck disable=SC2018,SC2019  # ASCII-only fallback (1 byte per char)
     out=$(printf '%s' "$raw" \
       | sed -E 's|[^a-zA-Z0-9_-]+|-|g; s|-+|-|g; s|^-||; s|-$||' \
       | tr 'A-Z' 'a-z')
     out=${out:0:50}
+    out=${out%-}
   fi
   case "$out" in
     "" | pane-* | tab-* | bash | zsh | sh | fish | dash) echo ""; return ;;
