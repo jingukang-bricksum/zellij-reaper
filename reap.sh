@@ -41,12 +41,17 @@ print_help() {
 zellij-reap — manually trigger a zellij-reaper pass
 
 Usage:
-  zellij-reap run         run one normal pass (uses the timer's threshold)
-  zellij-reap force-run   bypass the age check; reap any idle/exited session
-                          that passes every other safety guard
-  zellij-reap --help      show this message
+  zellij-reap run                run one normal pass (uses the timer's threshold)
+  zellij-reap force-run          bypass the age check; reap any idle/exited
+                                 session that passes every other safety guard
+  zellij-reap recover [--dry-run]
+                                 diagnose and repair sessions whose name made
+                                 the runtime socket path exceed Linux's 107-byte
+                                 limit (most often: too-long auto-renamed names
+                                 from older releases). --dry-run reports only.
+  zellij-reap --help             show this message
 
-Safety guards always honored (in both modes):
+Safety guards always honored (run / force-run):
   - never reap a session with a connected client
   - never reap a session with a foreground command in any pane
   - never reap a session whose layout has `command="claude"`
@@ -120,9 +125,134 @@ run_force() {
   print_log_delta "$mark"
 }
 
+run_recover() {
+  local dry=0
+  [ "${1:-}" = "--dry-run" ] && dry=1
+
+  local runtime_dir="/run/user/$UID/zellij/contract_version_1"
+  local info_dir="$HOME/.cache/zellij/contract_version_1/session_info"
+  local sock_limit=107
+  local prefix_len=$((${#runtime_dir} + 1))    # +1 for the trailing slash
+  local name_budget=$((sock_limit - prefix_len))
+
+  section "Scanning"
+  note "socket path limit: ${sock_limit} B"
+  note "name byte budget:  ${name_budget} B  (path prefix is ${prefix_len} B)"
+  [ "$dry" = 1 ] && note "DRY RUN — no changes will be made"
+
+  # Collect candidate names from both `zellij ls` and disk, deduped.
+  local -A seen=()
+  local sessions=()
+  local raw line n
+  if raw=$(zellij list-sessions -n 2>/dev/null); then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      n=$(awk '{print $1}' <<<"$line")
+      [ -n "${seen[$n]:-}" ] && continue
+      seen[$n]=1
+      sessions+=("$n")
+    done <<<"$raw"
+  fi
+  if [ -d "$info_dir" ]; then
+    local d
+    for d in "$info_dir"/*/; do
+      [ -d "$d" ] || continue
+      n=$(basename "$d")
+      [ -n "${seen[$n]:-}" ] && continue
+      seen[$n]=1
+      sessions+=("$n")
+    done
+  fi
+
+  if [ "${#sessions[@]}" -eq 0 ]; then
+    ok "no sessions found"
+    echo
+    return 0
+  fi
+
+  section "Diagnose"
+  local broken=() s nb total
+  for s in "${sessions[@]}"; do
+    nb=$(printf '%s' "$s" | wc -c)
+    total=$((nb + prefix_len))
+    if [ "$total" -gt "$sock_limit" ]; then
+      warn "$s"
+      note "  name=${nb} B, full path=${total} B  ($((total - sock_limit)) over)"
+      broken+=("$s")
+    fi
+  done
+
+  if [ "${#broken[@]}" -eq 0 ]; then
+    ok "all ${#sessions[@]} session(s) within budget"
+    echo
+    return 0
+  fi
+
+  echo
+  if [ "$dry" = 1 ]; then
+    section "Plan (dry run)"
+    for s in "${broken[@]}"; do
+      note "would: zellij delete-session -f, then kill server if alive, then rm disk traces  →  '$s'"
+    done
+    echo
+    return 0
+  fi
+
+  section "Repair"
+  local srv_pid fail
+  for s in "${broken[@]}"; do
+    fail=0
+    # 1) Try the CLI delete first — works for any EXITED entry; for RUNNING it
+    #    also force-kills the server. This is a disk operation, so the long
+    #    socket path is not a blocker.
+    if zellij delete-session "$s" -f >/dev/null 2>&1; then
+      ok "deleted via CLI: $s"
+      continue
+    fi
+
+    # 2) If the server is still alive (CLI couldn't talk to it because of the
+    #    bad socket), kill it directly.
+    srv_pid=$(pgrep -f "zellij --server $runtime_dir/$s\$" 2>/dev/null | head -1) || true
+    if [ -n "$srv_pid" ]; then
+      if kill "$srv_pid" 2>/dev/null; then
+        ok "killed server pid $srv_pid for $s"
+      else
+        fail=1
+      fi
+      sleep 1
+    fi
+
+    # 3) Wipe disk traces (resurrect data, leftover socket). The ":?" guard
+    #    aborts the rm if the parent dir variable ever becomes empty — belt
+    #    and suspenders against `rm -rf /<empty>/name`.
+    if [ -d "$info_dir/$s" ]; then
+      if rm -rf "${info_dir:?}/$s" 2>/dev/null; then
+        ok "removed cache: $info_dir/$s"
+      else
+        fail=1
+      fi
+    fi
+    if [ -e "$runtime_dir/$s" ]; then
+      if rm -f "${runtime_dir:?}/$s" 2>/dev/null; then
+        ok "removed socket: $runtime_dir/$s"
+      else
+        fail=1
+      fi
+    fi
+
+    [ "$fail" -ne 0 ] && err "incomplete cleanup for '$s' — manual removal may be needed"
+  done
+
+  echo
+  section "Done"
+  ok "${#broken[@]} broken session(s) processed"
+  echo
+}
+
 case "${1:-}" in
   -h|--help|"")  print_help; exit 0 ;;
   run)           run_normal ;;
   force-run|force) run_force ;;
+  recover)       shift; run_recover "$@" ;;
   *) printf 'unknown argument: %s\n\n' "$1" >&2; print_help >&2; exit 2 ;;
 esac

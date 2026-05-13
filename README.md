@@ -101,9 +101,14 @@ The timer fires on a 1-hour interval (`OnUnitActiveSec=1h`, `AccuracySec=5min`,
 ## Run on demand
 
 ```sh
-zellij-reap run         # one normal pass (uses the timer's threshold)
-zellij-reap force-run   # bypass the age check; reap any idle/exited session
-                        # that passes every other safety guard
+zellij-reap run                # one normal pass (uses the timer's threshold)
+zellij-reap force-run          # bypass the age check; reap any idle/exited
+                               # session that passes every other safety guard
+zellij-reap recover [--dry-run]
+                               # diagnose and repair sessions whose name
+                               # made the runtime socket path exceed 107 B
+                               # (legacy long-name auto-renames from older
+                               # releases). --dry-run reports only.
 zellij-reap --help
 ```
 
