@@ -50,8 +50,18 @@ fi
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 
 server_pid_for() {
-  local sock=$1
-  pgrep -f "zellij --server ${sock}\$" 2>/dev/null | head -1
+  # Match any 'zellij --server' process whose cmdline references this exact
+  # runtime socket path. We don't use a "$" anchor on pgrep because zellij
+  # wrappers (or any version that adds trailing args) would slip past it;
+  # walking all candidates and checking each cmdline is more robust.
+  local sock=$1 pid cmdline
+  while IFS= read -r pid; do
+    [ -z "$pid" ] && continue
+    cmdline=$(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null) || continue
+    case "$cmdline" in
+      *"$sock"*) printf '%s\n' "$pid"; return 0 ;;
+    esac
+  done < <(pgrep -f "zellij --server" 2>/dev/null || true)
 }
 
 latest_activity() {

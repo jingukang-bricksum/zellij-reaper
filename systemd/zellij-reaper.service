@@ -12,5 +12,6 @@ ExecStart=%h/.local/bin/zellij-reaper.sh
 Nice=10
 # A normal reaper pass takes well under a second. If we are still running
 # after one minute something is wrong (hung pgrep, stuck zellij CLI, etc) —
-# better to kill the run than keep it lingering.
-RuntimeMaxSec=60
+# better to kill the run than keep it lingering. RuntimeMaxSec= is ignored
+# for Type=oneshot, so we use TimeoutStartSec=, which IS honored for oneshot.
+TimeoutStartSec=60
