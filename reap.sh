@@ -199,48 +199,73 @@ run_recover() {
   fi
 
   section "Repair"
-  local srv_pid fail
+  local srv_pid cli_out acted
   for s in "${broken[@]}"; do
-    fail=0
-    # 1) Try the CLI delete first — works for any EXITED entry; for RUNNING it
-    #    also force-kills the server. This is a disk operation, so the long
-    #    socket path is not a blocker.
-    if zellij delete-session "$s" -f >/dev/null 2>&1; then
+    acted=0
+
+    # 1) Try the CLI delete first. For EXITED entries this is a pure disk
+    #    operation and should succeed without going near the socket. However,
+    #    some zellij versions return exit 0 even when they silently failed to
+    #    do anything (e.g. an internal step that tries to bind the socket and
+    #    runs into the path-length limit), so we don't trust the exit code —
+    #    we verify by checking disk after.
+    cli_out=$(zellij delete-session "$s" -f 2>&1) || true
+    sleep 0.2
+    if [ ! -d "$info_dir/$s" ] && [ ! -e "$runtime_dir/$s" ]; then
       ok "deleted via CLI: $s"
       continue
     fi
+    # CLI didn't actually clean up — log what it said and fall through.
+    if [ -n "$cli_out" ]; then
+      note "CLI said: $cli_out"
+    else
+      note "CLI returned without action; falling back to manual cleanup"
+    fi
 
-    # 2) If the server is still alive (CLI couldn't talk to it because of the
-    #    bad socket), kill it directly.
+    # 2) If the server is still alive, kill it. We can't reach it through the
+    #    broken socket, so signal the process directly.
     srv_pid=$(pgrep -f "zellij --server $runtime_dir/$s\$" 2>/dev/null | head -1) || true
     if [ -n "$srv_pid" ]; then
       if kill "$srv_pid" 2>/dev/null; then
-        ok "killed server pid $srv_pid for $s"
-      else
-        fail=1
+        ok "killed server pid $srv_pid"
+        acted=1
+        sleep 1
+        # If it ignored SIGTERM, follow with SIGKILL.
+        if kill -0 "$srv_pid" 2>/dev/null; then
+          kill -9 "$srv_pid" 2>/dev/null && ok "sent SIGKILL to $srv_pid"
+          sleep 0.5
+        fi
       fi
-      sleep 1
     fi
 
-    # 3) Wipe disk traces (resurrect data, leftover socket). The ":?" guard
-    #    aborts the rm if the parent dir variable ever becomes empty — belt
-    #    and suspenders against `rm -rf /<empty>/name`.
+    # 3) Wipe disk traces (resurrect data, leftover socket file). The ":?"
+    #    guard aborts the rm if the variable is ever empty — belt and
+    #    suspenders against accidental `rm -rf /<empty>/name`.
     if [ -d "$info_dir/$s" ]; then
       if rm -rf "${info_dir:?}/$s" 2>/dev/null; then
         ok "removed cache: $info_dir/$s"
+        acted=1
       else
-        fail=1
+        err "could not remove $info_dir/$s"
       fi
     fi
     if [ -e "$runtime_dir/$s" ]; then
       if rm -f "${runtime_dir:?}/$s" 2>/dev/null; then
         ok "removed socket: $runtime_dir/$s"
+        acted=1
       else
-        fail=1
+        err "could not remove $runtime_dir/$s"
       fi
     fi
 
-    [ "$fail" -ne 0 ] && err "incomplete cleanup for '$s' — manual removal may be needed"
+    # Final verification.
+    if [ -d "$info_dir/$s" ] || [ -e "$runtime_dir/$s" ]; then
+      err "traces still present for '$s' — try running as the session owner"
+      [ -d "$info_dir/$s" ] && note "  remaining: $info_dir/$s"
+      [ -e "$runtime_dir/$s" ] && note "  remaining: $runtime_dir/$s"
+    elif [ "$acted" -eq 0 ]; then
+      err "nothing to act on for '$s' (already gone? race?)"
+    fi
   done
 
   echo
