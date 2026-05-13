@@ -104,11 +104,16 @@ The timer fires on a 1-hour interval (`OnUnitActiveSec=1h`, `AccuracySec=5min`,
 zellij-reap run                # one normal pass (uses the timer's threshold)
 zellij-reap force-run          # bypass the age check; reap any idle/exited
                                # session that passes every other safety guard
-zellij-reap recover [--dry-run]
+zellij-reap recover [--dry-run] [--aggressive]
                                # diagnose and repair sessions whose name
                                # made the runtime socket path exceed 107 B
                                # (legacy long-name auto-renames from older
                                # releases). --dry-run reports only.
+                               # --aggressive also kills "orphan" zellij
+                               # --server processes that have no matching
+                               # socket file — these are usually the source
+                               # of broken sessions that reappear right
+                               # after cleanup.
 zellij-reap --help
 ```
 

@@ -44,11 +44,15 @@ Usage:
   zellij-reap run                run one normal pass (uses the timer's threshold)
   zellij-reap force-run          bypass the age check; reap any idle/exited
                                  session that passes every other safety guard
-  zellij-reap recover [--dry-run]
+  zellij-reap recover [--dry-run] [--aggressive]
                                  diagnose and repair sessions whose name made
                                  the runtime socket path exceed Linux's 107-byte
                                  limit (most often: too-long auto-renamed names
                                  from older releases). --dry-run reports only.
+                                 --aggressive also kills "orphan" zellij --server
+                                 processes that have no matching socket file —
+                                 these are usually the source of broken sessions
+                                 that reappear right after cleanup.
   zellij-reap --help             show this message
 
 Safety guards always honored (run / force-run):
@@ -126,8 +130,15 @@ run_force() {
 }
 
 run_recover() {
-  local dry=0
-  [ "${1:-}" = "--dry-run" ] && dry=1
+  local dry=0 aggressive=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run)    dry=1 ;;
+      --aggressive) aggressive=1 ;;
+      *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
+    esac
+    shift
+  done
 
   local runtime_dir="/run/user/$UID/zellij/contract_version_1"
   local info_dir="$HOME/.cache/zellij/contract_version_1/session_info"
@@ -169,6 +180,63 @@ run_recover() {
     echo
     return 0
   fi
+
+  # Orphan-server scan: 'zellij --server' processes whose cmdline-name has no
+  # matching socket file. These are usually servers whose in-memory name got
+  # renamed to something that overflowed the socket path, leaving them with
+  # no live socket. They keep rewriting session_info under that renamed name,
+  # which makes "broken sessions" reappear right after we delete them.
+  section "Orphan-server scan"
+  local -a orphans=()
+  local cmdline cname pid
+  while IFS= read -r pid; do
+    [ -z "$pid" ] && continue
+    cmdline=$(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null) || continue
+    case "$cmdline" in
+      *"$runtime_dir/"*)
+        cname="${cmdline#*"$runtime_dir/"}"
+        cname="${cname%% *}"
+        if [ -n "$cname" ] && [ ! -e "$runtime_dir/$cname" ]; then
+          orphans+=("$pid|$cname")
+        fi
+        ;;
+    esac
+  done < <(pgrep -f "zellij --server" 2>/dev/null || true)
+
+  if [ "${#orphans[@]}" -eq 0 ]; then
+    ok "no orphan servers (all live servers have a matching socket)"
+  else
+    warn "${#orphans[@]} server(s) live without a matching socket file:"
+    local entry
+    for entry in "${orphans[@]}"; do
+      note "  pid=${entry%%|*}  cmdline-name='${entry#*|}'"
+    done
+    if [ "$aggressive" = 1 ] && [ "$dry" = 0 ]; then
+      for entry in "${orphans[@]}"; do
+        pid="${entry%%|*}"
+        kill "$pid" 2>/dev/null
+        sleep 0.4
+        if kill -0 "$pid" 2>/dev/null; then
+          kill -9 "$pid" 2>/dev/null
+          sleep 0.3
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+          ok "killed orphan pid $pid"
+        else
+          err "could not kill orphan pid $pid"
+        fi
+      done
+      # Give the kernel a moment so their last-gasp writes don't recreate dirs.
+      sleep 1
+    elif [ "$aggressive" = 1 ] && [ "$dry" = 1 ]; then
+      note "would kill all ${#orphans[@]} orphan server(s)"
+    else
+      note "these are likely the source of broken sessions that reappear after"
+      note "cleanup. To kill them and complete the repair, re-run with:"
+      note "  zellij-reap recover --aggressive"
+    fi
+  fi
+  echo
 
   section "Diagnose"
   local broken=() s nb total
