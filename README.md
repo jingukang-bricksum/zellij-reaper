@@ -114,6 +114,16 @@ zellij-reap recover [--dry-run] [--aggressive]
                                # socket file — these are usually the source
                                # of broken sessions that reappear right
                                # after cleanup.
+zellij-reap resize [--dry-run] [--all-sessions]
+                               # force a layout-recalc on every attached
+                               # session so it picks up the current terminal
+                               # size. Effect matches detach→reattach but no
+                               # client is ever disconnected (uses
+                               # toggle-fullscreen ×2 under the hood, brief
+                               # flash). Sessions with no attached client are
+                               # skipped by default since the action has no
+                               # terminal to resize against; pass
+                               # --all-sessions to include them anyway.
 zellij-reap --help
 ```
 
