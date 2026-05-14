@@ -65,8 +65,48 @@ server_pid_for() {
 }
 
 latest_activity() {
+  # Returns the unix timestamp of the most recent *real* activity for the
+  # session whose session_info dir is $info. "Real" means user-visible I/O on
+  # a pane, not zellij's internal housekeeping.
+  #
+  # The session_info dir is a trap: zellij rewrites session-metadata.kdl
+  # roughly every minute as a heartbeat, so its mtime is always ≈now even for
+  # sessions untouched for days — that made every IDLE check report "0h since
+  # last activity" and the reaper SKIP everything. We instead walk the
+  # session's running server, find each pane shell's PTY device (/dev/pts/N),
+  # and take the newest of those mtimes. The kernel only updates a PTY's
+  # mtime on actual read/write, so that IS the user-activity signal.
+  #
+  # For EXITED sessions (no live server, no PTY) we fall back to the metadata
+  # mtime: it's frozen at the moment of server death and so is a fine lower
+  # bound for "last activity".
   local info=$1
   [ -d "$info" ] || { echo ""; return; }
+  local name
+  name=$(basename "$info")
+
+  local sock="$RUNTIME_DIR/$name"
+  local srv_pid=""
+  if [ -S "$sock" ]; then
+    srv_pid=$(server_pid_for "$sock")
+  fi
+
+  if [ -n "$srv_pid" ]; then
+    local latest=0 sh pty m
+    for sh in $(pgrep -P "$srv_pid" 2>/dev/null || true); do
+      pty=$(readlink /proc/"$sh"/fd/0 2>/dev/null) || continue
+      [ -n "$pty" ] || continue
+      [ -e "$pty" ] || continue
+      m=$(stat -c %Y "$pty" 2>/dev/null) || continue
+      [ "$m" -gt "$latest" ] && latest=$m
+    done
+    if [ "$latest" -gt 0 ]; then
+      echo "$latest"
+      return
+    fi
+  fi
+
+  # Fallback: EXITED session, or no readable PTYs.
   local m
   m=$(stat -c %Y "$info"/* 2>/dev/null | sort -n | tail -1)
   echo "${m:-}"

@@ -114,15 +114,18 @@ zellij-reap recover [--dry-run] [--aggressive]
                                # socket file — these are usually the source
                                # of broken sessions that reappear right
                                # after cleanup.
-zellij-reap resize [--dry-run]
-                               # send SIGWINCH to every zellij client process
-                               # (skips `zellij --server` and the running CLI).
-                               # Each client re-reads its PTY size and reports
-                               # the new geometry to the server, which redraws.
-                               # Same path a real terminal resize takes — no
-                               # disconnect, no visible flash. Detached
-                               # sessions have no client process, so they are
-                               # naturally a no-op.
+zellij-reap resize [--dry-run] [--shallow]
+                               # SIGWINCH every zellij client, every zellij
+                               # server, and every descendant of those servers
+                               # (the per-pane shells and their children —
+                               # claude, vim, htop, …). Catches the case where
+                               # SIGWINCH propagation through the client →
+                               # server → pane chain is lossy and an in-pane
+                               # TUI is left holding stale geometry. No
+                               # disconnect, no visible flash; targets that
+                               # already match treat the signal as a no-op.
+                               # --shallow restricts the signal to clients
+                               # only (original behaviour).
 zellij-reap --help
 ```
 
@@ -187,11 +190,16 @@ RUNNING:
 
 ## Caveats
 
-- The "last activity" signal is the mtime of files under
-  `~/.cache/zellij/contract_version_1/session_info/<name>/`, which zellij
-  updates on its own schedule (not continuously). A session you detached from
-  five minutes ago may have an mtime that is already 15 minutes old. Pick
-  `MAX_AGE_HOURS` accordingly.
+- The "last activity" signal for RUNNING sessions is the mtime of each pane
+  shell's PTY device (`/dev/pts/N`), taken across every shell under the
+  session's `zellij --server` process. The kernel only updates that mtime on
+  actual read/write, so it reflects real user/program I/O. EXITED sessions
+  (no live server, no PTY) fall back to the mtime of files under
+  `~/.cache/zellij/contract_version_1/session_info/<name>/` — frozen at the
+  moment of server death, so still a sensible lower bound.
+  Earlier releases used the session_info mtime for all sessions, which made
+  every IDLE check report "0h since last activity" because zellij rewrites
+  `session-metadata.kdl` every minute as a heartbeat.
 - A background job started with `disown` (or `nohup`) reparents to `init` and
   is no longer a child of its pane's shell. That pane will look idle to the
   reaper. This is intentional — such jobs survive the reaper deletion too.
