@@ -12,12 +12,14 @@
 #                 - never reap a session with a foreground command in a pane
 #                 - never reap a session created with `command="claude"`
 #                 - obey PROTECT_REGEX
-#   resize      send SIGWINCH to every zellij client process so each one
-#               re-reads its PTY size and reports the new geometry to the
-#               server. This is what a real terminal resize triggers under
-#               the hood. No client is disconnected and there is no visible
-#               flash; if a client's PTY size is already correct the signal
-#               is a cheap no-op.
+#   resize      send SIGWINCH to every zellij client process AND to every
+#               descendant of every zellij server (the per-pane shells and
+#               their children — bash, claude, vim, htop, …). Clients re-read
+#               their PTY and report the new geometry; in-pane TUIs re-read
+#               their pane PTY and redraw. Covers the case where SIGWINCH
+#               propagation through the zellij client→server→pane chain is
+#               lossy. No disconnect, no flash; all targets handle SIGWINCH
+#               as a harmless no-op when the size is already correct.
 #
 # When installed via ./install.sh this file is also placed at
 # ~/.local/bin/zellij-reap so you can run `zellij-reap run` from anywhere.
@@ -59,15 +61,16 @@ Usage:
                                  processes that have no matching socket file —
                                  these are usually the source of broken sessions
                                  that reappear right after cleanup.
-  zellij-reap resize [--dry-run]
-                                 send SIGWINCH to every zellij client process
-                                 (i.e. `zellij` invocations attached to a
-                                 session, excluding `zellij --server`). Each
-                                 client re-reads its PTY size and reports it to
-                                 the server, which then redraws the layout. No
-                                 disconnect, no visible flash. Detached sessions
-                                 have no client process so they're automatically
-                                 a no-op.
+  zellij-reap resize [--dry-run] [--shallow]
+                                 SIGWINCH every zellij client, every zellij
+                                 server, and every descendant of those servers
+                                 (pane shells and their children — claude,
+                                 vim, htop, …). This is the strongest external
+                                 trigger short of detach/reattach: it covers
+                                 the case where the in-pane TUI never receives
+                                 SIGWINCH through the normal zellij chain.
+                                 --shallow restricts the signal to clients
+                                 only, matching the original behaviour.
   zellij-reap --help             show this message
 
 Safety guards always honored (run / force-run):
@@ -400,63 +403,112 @@ run_recover() {
 }
 
 run_resize() {
-  local dry=0
+  local dry=0 shallow=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) dry=1 ;;
+      --shallow) shallow=1 ;;
       *) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     esac
     shift
   done
 
-  section "Refreshing client sizes via SIGWINCH"
+  section "Refreshing sizes via SIGWINCH"
   [ "$dry" = 1 ] && note "DRY RUN — no signals sent"
+  [ "$shallow" = 1 ] && note "shallow mode — clients only, no pane descendants"
 
-  # Walk every process owned by this user whose argv0 is `zellij`, and skip
-  # `zellij --server` (those don't own a PTY) plus our own running CLI (whose
-  # cmdline matches "zellij-reap"). Everything else is a client.
-  local pid cmdline self_pid=$$
-  local -a clients=()
+  # `pgrep --ns 1` would scope to the host namespace, but that flag is not
+  # always available, so we filter manually below by walking /proc.
+  local self_pid=$$ pid cmdline
+  local -A targets=()   # pid -> short label for output
+
+  classify() {
+    # Echo "client" / "server" / "skip" based on cmdline.
+    local cl=$1
+    case "$cl" in
+      *zellij-reap*)    echo skip ;;
+      *zellij\ --server*|*zellij\ \\--server*)
+                        echo server ;;
+      *--server*)       echo server ;;  # defensive: also catch unusual quoting
+      zellij*|*\ zellij|*\ zellij\ *)
+                        echo client ;;
+      *)                echo skip ;;
+    esac
+  }
+
+  # 1) Collect zellij clients and servers owned by this user.
+  local -a clients=() servers=()
   while IFS= read -r pid; do
     [ -z "$pid" ] && continue
     [ "$pid" = "$self_pid" ] && continue
     cmdline=$(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null) || continue
-    case "$cmdline" in
-      *--server*)   continue ;;
-      *zellij-reap*) continue ;;
-      zellij*)      clients+=("$pid|$cmdline") ;;
+    case "$(classify "$cmdline")" in
+      client) clients+=("$pid|${cmdline% }") ;;
+      server) servers+=("$pid|${cmdline% }") ;;
     esac
   done < <(pgrep -u "$UID" "^zellij" 2>/dev/null || true)
 
-  if [ "${#clients[@]}" -eq 0 ]; then
-    warn "no zellij client processes found"
-    note "nothing is attached — there's nothing to resize"
+  local entry
+  for entry in "${clients[@]}"; do targets["${entry%%|*}"]="client  ${entry#*|}"; done
+
+  # 2) Unless --shallow, walk every server's descendant tree and add the
+  #    in-pane shells, their children (claude, vim, …), and so on. SIGWINCH
+  #    is harmless on any process that doesn't expect a TTY.
+  if [ "$shallow" = 0 ]; then
+    local -a frontier=()
+    for entry in "${servers[@]}"; do
+      pid="${entry%%|*}"
+      targets[$pid]="server  ${entry#*|}"
+      frontier+=("$pid")
+    done
+    local cur next_pid label
+    while [ "${#frontier[@]}" -gt 0 ]; do
+      cur=${frontier[0]}
+      frontier=("${frontier[@]:1}")
+      while IFS= read -r next_pid; do
+        [ -z "$next_pid" ] && continue
+        # avoid revisiting; also never signal ourselves
+        [ "$next_pid" = "$self_pid" ] && continue
+        [ -n "${targets[$next_pid]:-}" ] && continue
+        cmdline=$(tr '\0' ' ' </proc/"$next_pid"/cmdline 2>/dev/null) || continue
+        label="${cmdline% }"
+        [ -z "$label" ] && label="(unknown)"
+        targets[$next_pid]="descendant  $label"
+        frontier+=("$next_pid")
+      done < <(pgrep -P "$cur" 2>/dev/null || true)
+    done
+  fi
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    warn "no zellij processes found — nothing to signal"
     echo
     return 0
   fi
 
-  local sent=0 failed=0 entry
-  for entry in "${clients[@]}"; do
-    pid="${entry%%|*}"
-    cmdline="${entry#*|}"
+  # 3) Send (or dry-print) SIGWINCH. Sort by PID for stable output.
+  local sent=0 failed=0
+  local -a pids
+  mapfile -t pids < <(printf '%s\n' "${!targets[@]}" | sort -n)
+  for pid in "${pids[@]}"; do
+    label="${targets[$pid]}"
     if [ "$dry" = 1 ]; then
-      ok "would SIGWINCH pid=$pid  (${cmdline% })"
+      ok "would SIGWINCH  pid=$pid  $label"
       continue
     fi
     if kill -WINCH "$pid" 2>/dev/null; then
-      ok "SIGWINCH → pid=$pid"
+      ok "SIGWINCH → pid=$pid  ${label%%  *}"
       sent=$((sent + 1))
     else
-      err "kill -WINCH failed for pid=$pid (process gone?)"
+      err "kill -WINCH failed for pid=$pid (gone?)"
       failed=$((failed + 1))
     fi
   done
 
   echo
   if [ "$dry" = 1 ]; then
-    note "dry run: ${#clients[@]} client(s) would be signaled"
+    note "dry run: ${#targets[@]} target(s) would be signaled"
   else
-    ok "signaled $sent client(s)"
+    ok "signaled $sent process(es)"
     [ "$failed" -gt 0 ] && warn "$failed signal(s) failed"
   fi
   echo
